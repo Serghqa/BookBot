@@ -22,7 +22,7 @@ def create_books_keyboard(*books):
     return kb_builder.as_markup()
 
 
-def create_keyboard(*buttons, width=None):
+def create_keyboard(*buttons, width: int | None = None):
     if width is None:
         width = len(buttons)
     kb_builder = InlineKeyboardBuilder()

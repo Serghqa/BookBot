@@ -1,10 +1,8 @@
 import logging
 
-from copy import deepcopy
-
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
-from aiogram.filters import CommandStart, StateFilter
+from aiogram.filters import CommandStart
 from aiogram.types import Message, CallbackQuery
 
 from keyboards import (
@@ -12,7 +10,7 @@ from keyboards import (
     create_keyboard_bookmarks,
     create_keyboard_del_bookmarks,
 )
-from database import user_db, user_dict_template
+from database import user_dict_template
 from file_handling import books as user_books
 from functions import (
     get_page,
@@ -20,7 +18,8 @@ from functions import (
     get_user_bookmarks,
     delete_bookmark,
     get_page_read,
-    move_to_bookmark
+    move_to_bookmark,
+    fill_storage
 )
 from filters import IsBookmarks, MoveToBookmark, DelBookmark
 from lexicon import HANDLERS_LEXICON, KEYBOARDS_LEXICON
@@ -32,14 +31,16 @@ router = Router()
 
 
 @router.message(CommandStart())
-async def process_start_command(message: Message):
-
-    if message.from_user.id not in user_db:
-        user_db[message.from_user.id] = {}
-        for name_book, book in user_books.items():
-            user_db[message.from_user.id][name_book] =\
-                deepcopy(user_dict_template)
-            user_db[message.from_user.id][name_book]['last_page'] = len(book)
+async def process_start_command(message: Message, state: FSMContext):
+    #  await state.clear()
+    storage = await state.get_data()
+    if str(message.from_user.id) not in storage:
+        await fill_storage(
+            message,
+            state,
+            user_books,
+            user_dict_template
+        )
 
     await message.answer(
         text=HANDLERS_LEXICON[message.text],
@@ -58,19 +59,35 @@ async def procces_help_command(message: Message):
 
 
 @router.message(F.text == '/beginning')
-async def process_beginning_command(message: Message):
+async def process_beginning_command(message: Message, state: FSMContext):
 
-    if user_db:
+    storage = await state.get_data()
+    if storage['book']:
+        if storage[str(message.from_user.id)][storage['book']]['page'] != 1:
+            await message.answer(
+                text=HANDLERS_LEXICON['beginning']
+            )
+
+        number, last_number, page = get_page_read(
+            message,
+            storage,
+            user_books,
+            'begin'
+        )
+        storage[str(message.from_user.id)][storage['book']]['page'] = number
+        await state.update_data(storage)
+
         await message.answer(
-            text=HANDLERS_LEXICON[message.text],
+            text=page,
             reply_markup=create_keyboard(
-                KEYBOARDS_LEXICON[message.text]
+                KEYBOARDS_LEXICON['prev'],
+                f'{number}/{last_number}',
+                KEYBOARDS_LEXICON['next']
             )
         )
-
     else:
         await message.answer(
-            text='Выбери книгу',
+            text=HANDLERS_LEXICON['book_selection'],
             reply_markup=create_keyboard(
                 *user_books,
                 width=1
@@ -79,19 +96,35 @@ async def process_beginning_command(message: Message):
 
 
 @router.message(F.text == '/continue')
-async def process_continue_command(message: Message):
+async def process_continue_command(message: Message, state: FSMContext):
 
-    if user_db:
+    storage = await state.get_data()
+    if storage['book']:
         await message.answer(
-            text=HANDLERS_LEXICON[message.text],
+            text=HANDLERS_LEXICON[message.text]
+        )
+
+        number, last_number, page = get_page_read(
+            message,
+            storage,
+            user_books,
+            'continue'
+        )
+        storage[str(message.from_user.id)][storage['book']]['page'] = number
+        await state.update_data(storage)
+
+        await message.answer(
+            text=page,
             reply_markup=create_keyboard(
-                KEYBOARDS_LEXICON[message.text]
+                KEYBOARDS_LEXICON['prev'],
+                f'{number}/{last_number}',
+                KEYBOARDS_LEXICON['next']
             )
         )
 
     else:
         await message.answer(
-            text='Выбери книгу',
+            text=HANDLERS_LEXICON['book_selection'],
             reply_markup=create_keyboard(
                 *user_books,
                 width=1
@@ -102,24 +135,41 @@ async def process_continue_command(message: Message):
 @router.message(F.text == '/bookmarks')
 async def process_bookmarks_command(message: Message, state: FSMContext):
 
-    if user_db:
-        storage = await state.get_data()
-        bookmakrs = get_user_bookmarks(message, user_db, storage['book'])
-        if not bookmakrs:
+    storage = await state.get_data()
+    if storage['book']:
+        bookmarks = get_user_bookmarks(
+            storage,
+            message
+        )
+        if not bookmarks:
             await message.answer(
-                text='У вас нет закладок'
+                text=HANDLERS_LEXICON['not_bookmarks']
+            )
+            number, last_number, page = get_page(
+                message,
+                storage,
+                user_books
+            )
+
+            await message.answer(
+                text=page,
+                reply_markup=create_keyboard(
+                    KEYBOARDS_LEXICON['prev'],
+                    f'{number}/{last_number}',
+                    KEYBOARDS_LEXICON['next']
+                )
             )
         else:
             await message.answer(
                 text=HANDLERS_LEXICON[message.text],
                 reply_markup=create_keyboard_bookmarks(
-                    *bookmakrs
+                    *bookmarks
                 )
             )
 
     else:
         await message.answer(
-            text='Выбери книгу',
+            text=HANDLERS_LEXICON['book_selection'],
             reply_markup=create_keyboard(
                 *user_books,
                 width=1
@@ -128,7 +178,7 @@ async def process_bookmarks_command(message: Message, state: FSMContext):
 
 
 @router.message(F.text == '/books')
-async def process_get_books(message: Message):
+async def process_book_selection(message: Message):
 
     await message.answer(
         text=HANDLERS_LEXICON[message.text],
@@ -140,49 +190,33 @@ async def process_get_books(message: Message):
 
 
 @router.callback_query(F.data.in_(user_books))
-async def process_start_read_book(callback: CallbackQuery, state: FSMContext):
+async def process_book_start(callback: CallbackQuery, state: FSMContext):
 
-    name_book = callback.data
-    await state.update_data(book=name_book)
-    await callback.message.edit_text(
-        text=f'Вы будете читать книгу {name_book}',
-        reply_markup=create_keyboard(
-            'Читать'
-        )
-    )
-
-
-@router.callback_query(F.data == 'Читать')
-async def process_start_read(callback: CallbackQuery, state: FSMContext):
-
+    await state.update_data(book=callback.data)
     storage = await state.get_data()
-    number, page = get_page(
+    number, last_number, page = get_page(
         callback,
-        user_db,
-        user_books[storage['book']],
-        storage['book']
+        storage,
+        user_books
     )
-
     await callback.message.edit_text(
         text=page,
         reply_markup=create_keyboard(
             KEYBOARDS_LEXICON['prev'],
-            f'{number}/'
-            f'{user_db[callback.from_user.id][storage['book']]['last_page']}',
+            f'{number}/{last_number}',
             KEYBOARDS_LEXICON['next']
         )
     )
 
 
 @router.callback_query(F.data == '<<')
-async def process_prev_page_command(callback: CallbackQuery, state: FSMContext):
+async def prev_page_command(callback: CallbackQuery, state: FSMContext):
 
     storage = await state.get_data()
-    number, page = get_page(
+    number, last_number, page = get_page(
         callback,
-        user_db,
-        user_books[storage['book']],
-        storage['book'],
+        storage,
+        user_books,
         step=-1
     )
 
@@ -191,139 +225,156 @@ async def process_prev_page_command(callback: CallbackQuery, state: FSMContext):
             text=page,
             reply_markup=create_keyboard(
                 KEYBOARDS_LEXICON['prev'],
-                f'{number}/{user_db[callback.from_user.id][storage['book']]['last_page']}',
+                f'{number}/{last_number}',
                 KEYBOARDS_LEXICON['next']
             )
         )
+        storage[str(callback.from_user.id)][storage['book']]['page'] = number
+        await state.update_data(storage)
 
     else:
         await callback.answer()
 
 
 @router.callback_query(F.data == '>>')
-async def process_next_page_command(callback: CallbackQuery, state: FSMContext):
+async def next_page_command(callback: CallbackQuery, state: FSMContext):
 
     storage = await state.get_data()
-    number, page = get_page(callback, user_db, user_books[storage['book']], storage['book'], step=1)
+    number, last_number, page = get_page(
+        callback,
+        storage,
+        user_books,
+        step=1
+    )
 
     if number and page:
         await callback.message.edit_text(
             text=page,
             reply_markup=create_keyboard(
                 KEYBOARDS_LEXICON['prev'],
-                f'{number}/{user_db[callback.from_user.id][storage['book']]['last_page']}',
+                f'{number}/{last_number}',
                 KEYBOARDS_LEXICON['next']
             )
         )
+        storage[str(callback.from_user.id)][storage['book']]['page'] = number
+        storage[str(callback.from_user.id)][storage['book']]['continue'] = number
+        await state.update_data(storage)
 
     else:
         await callback.answer()
 
 
-@router.callback_query(F.data == 'Продолжить читать')
-async def process_continue_read_command(callback: CallbackQuery, state: FSMContext):
-
-    storage = await state.get_data()
-    number, page = get_page_read(callback, user_db, user_books[storage['book']], storage['book'], 'continue')
-
-    await callback.message.edit_text(
-        text=page,
-        reply_markup=create_keyboard(
-            KEYBOARDS_LEXICON['prev'],
-            f'{number}/{user_db[callback.from_user.id][storage['book']]['last_page']}',
-            KEYBOARDS_LEXICON['next']
-        )
-    )
-
-
-@router.callback_query(F.data == 'В начало книги')
-async def process_beggin_command(callback: CallbackQuery, state: FSMContext):
-
-    storage = await state.get_data()
-    number, page = get_page_read(callback, user_db, user_books[storage['book']], storage['book'], 'begin')
-
-    await callback.message.edit_text(
-        text=page,
-        reply_markup=create_keyboard(
-            KEYBOARDS_LEXICON['prev'],
-            f'{number}/{user_db[callback.from_user.id][storage['book']]['last_page']}',
-            KEYBOARDS_LEXICON['next']
-        )
-    )
-
-
 @router.callback_query(F.data == 'edit_bookmarks')
-async def process_edit_bookmarks_command(callback: CallbackQuery, state: FSMContext):
+async def edit_bookmarks_command(callback: CallbackQuery, state: FSMContext):
 
     storage = await state.get_data()
     bookmarks = get_user_bookmarks(
+        storage,
         callback,
-        user_db,
-        storage['book'],
         ' del'
     )
 
     await callback.message.edit_text(
-        text='Удалить закладку',
-        reply_markup=create_keyboard_del_bookmarks(*bookmarks)
+        text=HANDLERS_LEXICON['delete_bookmark'],
+        reply_markup=create_keyboard_del_bookmarks(
+            *bookmarks
+        )
     )
 
 
 @router.callback_query(F.data == 'cancel')
-async def process_cancel_command(callback: CallbackQuery, state: FSMContext):
+async def cancel_command(callback: CallbackQuery, state: FSMContext):
 
     storage = await state.get_data()
-    number, page = get_page(callback, user_db, user_books[storage['book']], storage['book'])
+    number, last_number, page = get_page(
+        callback,
+        storage,
+        user_books,
+    )
 
     await callback.message.edit_text(
         text=page,
         reply_markup=create_keyboard(
             KEYBOARDS_LEXICON['prev'],
-            f'{number}/{user_db[callback.from_user.id][storage['book']]['last_page']}',
+            f'{number}/{last_number}',
             KEYBOARDS_LEXICON['next']
         )
     )
 
 
 @router.callback_query(DelBookmark())
-async def process_del_bookmark_command(callback: CallbackQuery, state: FSMContext):
+async def del_bookmark(callback: CallbackQuery, state: FSMContext):
 
     storage = await state.get_data()
-    bookmarks = delete_bookmark(callback, user_db, storage['book'])
+    bookmarks = delete_bookmark(
+        callback,
+        storage
+    )
+    await state.update_data(storage)
 
     if not bookmarks:
-        await callback.message.edit_text(
-            text='У вас нет закладок',
-            reply_markup=create_keyboard('Продолжить читать')
+        await callback.message.delete()
+        await callback.answer(
+            text=HANDLERS_LEXICON['not_bookmarks']
+        )
+        number, last_number, page = get_page(
+            callback,
+            storage,
+            user_books,
+        )
+        await callback.message.answer(
+            text=page,
+            reply_markup=create_keyboard(
+                KEYBOARDS_LEXICON['prev'],
+                f'{number}/{last_number}',
+                KEYBOARDS_LEXICON['next']
+            )
         )
 
     else:
         await callback.message.edit_text(
-            text='Удалить закладку',
+            text=HANDLERS_LEXICON['delete_bookmark'],
             reply_markup=create_keyboard_bookmarks(*bookmarks)
         )
 
 
 @router.callback_query(IsBookmarks())
-async def process_set_bookmark_command(callback: CallbackQuery, state: FSMContext):
+async def add_bookmark_command(callback: CallbackQuery, state: FSMContext):
 
     storage = await state.get_data()
-    bookmark = add_bookmark(callback, user_db, user_books[storage['book']], storage['book'])
+    bookmark = add_bookmark(
+        callback,
+        storage,
+        user_books
+    )
 
-    await callback.answer(text=f'Закладка {bookmark.split()[0]} добавлена')
+    await state.update_data(storage)
+    if bookmark:
+        await callback.answer(
+            text=f'Закладка {bookmark.split()[0]} добавлена'
+        )
+    else:
+        await callback.answer(
+            text='Закладка уже есть'
+        )
 
 
 @router.callback_query(MoveToBookmark())
 async def process_move_to_bookmark(callback: CallbackQuery, state: FSMContext):
 
     storage = await state.get_data()
-    number, page = move_to_bookmark(callback, user_db, user_books[storage['book']], storage['book'])
+    number, last_number, page = move_to_bookmark(
+        callback,
+        storage,
+        user_books,
+    )
+    await state.update_data(storage)
 
     await callback.message.edit_text(
         text=page,
         reply_markup=create_keyboard(
             KEYBOARDS_LEXICON['prev'],
-            f'{number}/{user_db[callback.from_user.id][storage['book']]['last_page']}',
+            f'{number}/{last_number}',
             KEYBOARDS_LEXICON['next']
         )
     )

@@ -3,7 +3,7 @@ import logging
 import logging.config
 
 from aiogram import Bot, Dispatcher
-from aiogram.fsm.storage.memory import MemoryStorage
+from aiogram.fsm.storage.redis import Redis, RedisStorage
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
 
@@ -21,7 +21,8 @@ logger = logging.getLogger(__name__)
 async def main():
     logger.info('Start bot')
     config = load_config()
-    storage = MemoryStorage()
+    redis = Redis(host='localhost')
+    storage = RedisStorage(redis=redis)
     bot = Bot(
         token=config.tg_bot.token,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML)

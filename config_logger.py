@@ -17,6 +17,7 @@ CONFIG_LOGGER = {
         '': {
             'formatter': 'default',
             'handlers': ['default'],
+            'level': 'DEBUG',
             'propagate': True
         },
         '__main__': {
@@ -26,6 +27,12 @@ CONFIG_LOGGER = {
             'propagate': False
         },
         'handlers': {
+            'formatter': 'default',
+            'handlers': ['default'],
+            'level': 'INFO',
+            'propagate': False
+        },
+        'functions': {
             'formatter': 'default',
             'handlers': ['default'],
             'level': 'INFO',
